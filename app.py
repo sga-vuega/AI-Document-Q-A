@@ -26,7 +26,7 @@ client = MongoClient(MONGO_URI, server_api=ServerApi('1'))
 db = client["userembeddings"]
 collection = db["embeddings"]
 
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 def initialize_vector_db():
     model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -44,7 +44,7 @@ if "config" not in st.session_state:
     st.session_state.config = {
         "temperature": 0.7,
         "top_p": 1.0,
-        "system_prompt": "You are a helpful assistant. Answer based on context.",
+        "system_prompt": "Answer based on context.",
         "text_chunks": []
     }
 
@@ -79,7 +79,6 @@ def extract_text(uploaded_file):
             st.error(f"An error occurred with PyPDF2: {e}")
 
     return text
-
 
 def process_pdf(file, filename):
     text = extract_text(file)
@@ -162,7 +161,6 @@ def generate_response(prompt, context):
 def delete_file(filename):
     """Delete a specific file and its embeddings from MongoDB."""
     collection.delete_many({"filename": filename})
-    st.session_state.stored_pdfs.remove(filename)
     st.session_state.file_uploader_key += 1  # Reset file uploader
     st.rerun()
 
