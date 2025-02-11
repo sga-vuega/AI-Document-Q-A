@@ -82,9 +82,8 @@ def update_vector_db(texts, filename):
     documents = [{"filename": filename, "text": text, "embedding": emb} for text, emb in zip(texts, embeddings)]
     collection.insert_many(documents)
     faiss_index.add(np.array(embeddings, dtype="float32"))
-    faiss.write_index(faiss_index, INDEX_FILE)
+    #faiss.write_index(faiss_index, INDEX_FILE)
 
-# **Retrieve Context for Q&A**
 def retrieve_context(query, top_k=15):
     query_embedding = embedding_model.encode([query]).tolist()[0]
     stored_docs = list(collection.find({}, {"_id": 0, "embedding": 1, "text": 1}))
@@ -95,11 +94,23 @@ def retrieve_context(query, top_k=15):
     embeddings = np.array([doc["embedding"] for doc in stored_docs], dtype="float32")
     texts = [doc["text"] for doc in stored_docs]
 
-    index = faiss.IndexFlatL2(384)
-    index.add(embeddings)
+    # Ensure FAISS index is initialized properly
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    if index.ntotal == 0:
+        index.add(embeddings)
 
+    top_k = min(top_k, len(texts))  # Avoid requesting more results than available
     distances, indices = index.search(np.array([query_embedding], dtype="float32"), top_k)
-    return [texts[i] for i in indices[0] if i < len(texts)]
+
+    # Remove duplicates from results
+    seen = set()
+    unique_texts = []
+    for i in indices[0]:
+        if i < len(texts) and texts[i] not in seen:
+            seen.add(texts[i])
+            unique_texts.append(texts[i])
+
+    return unique_texts
 
 # **Generate Response using Gemini**
 def generate_response(prompt, context):
@@ -198,9 +209,11 @@ if prompt := st.chat_input("Ask a question (English/Swedish)"):
     except:
         lang = "en"
 
-    context = " ".join(retrieve_context(prompt)) if retrieve_context(prompt) else "No relevant context found."
+    retrieved_context = retrieve_context(prompt)
+    context = " ".join(retrieved_context) if retrieved_context else "No relevant context found."
 
     with st.spinner("Generating response..."):
+        #st.write(context)
         response = generate_response(prompt, context)
 
     st.session_state.messages.append({"role": "user", "content": prompt})
