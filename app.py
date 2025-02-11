@@ -103,7 +103,7 @@ def retrieve_context(query, top_k=15):
 
 # **Generate Response using Gemini**
 def generate_response(prompt, context):
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.0-flash-exp")
     try:
         response = model.generate_content(
             f"{st.session_state.config['system_prompt']}\n\nContext: {context}\n\nQuestion: {prompt}",
@@ -182,7 +182,7 @@ if stored_files:
         delete_all_files()
 else:
     st.info("No files stored in the database.")
-    
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
