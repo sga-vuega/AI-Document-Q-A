@@ -9,3 +9,4 @@ langdetect
 google-generativeai
 python-dotenv
 pymongo 
+pdfplumber
