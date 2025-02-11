@@ -1,8 +1,5 @@
 import streamlit as st
 import os
-import requests
-from bs4 import BeautifulSoup
-import PyPDF2
 import io
 import faiss
 import numpy as np
@@ -15,6 +12,9 @@ from dotenv import load_dotenv
 from io import BytesIO
 from pymongo import MongoClient
 from pymongo.server_api import ServerApi
+from google.api_core import exceptions
+from PyPDF2 import PdfReader
+import pdfplumber
 
 # Load environment variables
 load_dotenv()
@@ -26,16 +26,11 @@ client = MongoClient(MONGO_URI, server_api=ServerApi('1'))
 db = client["userembeddings"]
 collection = db["embeddings"]
 
-# Initialize Gemini API
-if API_KEY:
-    genai.configure(api_key=API_KEY)
-
-# FAISS & Embedding Model Initialization
-INDEX_FILE = "faiss_index.index"
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 def initialize_vector_db():
     model = SentenceTransformer("all-MiniLM-L6-v2")
-    index = faiss.read_index(INDEX_FILE) if os.path.exists(INDEX_FILE) else faiss.IndexFlatL2(384)
+    index =  faiss.IndexFlatL2(384)
     return model, index
 
 embedding_model, faiss_index = initialize_vector_db()
@@ -48,7 +43,7 @@ if "stored_pdfs" not in st.session_state:
 if "config" not in st.session_state:
     st.session_state.config = {
         "temperature": 0.7,
-        "top_p": 0.9,
+        "top_p": 1.0,
         "system_prompt": "You are a helpful assistant. Answer based on context.",
         "text_chunks": []
     }
@@ -65,13 +60,29 @@ def load_config(uploaded_file):
     except Exception as e:
         st.sidebar.error(f"Failed to load configuration: {e}")
 
-# **PDF Processing**
-def extract_text_from_pdf(file):
-    reader = PyPDF2.PdfReader(file)
-    return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+def extract_text(uploaded_file):
+    """Extract text from a single PDF."""
+    text = ""
+    try:
+        file_bytes = io.BytesIO(uploaded_file.getvalue())
+        with pdfplumber.open(file_bytes) as pdf:
+            text = ''.join([page.extract_text() or " " for page in pdf.pages])
+    except Exception as e:
+        st.error(f"An error occurred with pdfplumber: {e}")
+
+    if not text:
+        try:
+            file_bytes.seek(0)
+            reader = PdfReader(file_bytes)
+            text = ''.join([page.extract_text() or " " for page in reader.pages])
+        except Exception as e:
+            st.error(f"An error occurred with PyPDF2: {e}")
+
+    return text
+
 
 def process_pdf(file, filename):
-    text = extract_text_from_pdf(file)
+    text = extract_text(file)
     chunks = [text[i:i+2000] for i in range(0, len(text), 2000)]
     st.session_state.config["text_chunks"].extend(chunks)
     update_vector_db(chunks, filename)
@@ -94,13 +105,12 @@ def retrieve_context(query, top_k=15):
     embeddings = np.array([doc["embedding"] for doc in stored_docs], dtype="float32")
     texts = [doc["text"] for doc in stored_docs]
 
-    # Ensure FAISS index is initialized properly
-    index = faiss.IndexFlatL2(embeddings.shape[1])
-    if index.ntotal == 0:
-        index.add(embeddings)
+    if faiss_index.ntotal == 0:
+        faiss_index.add(np.array(embeddings, dtype="float32"))
+
 
     top_k = min(top_k, len(texts))  # Avoid requesting more results than available
-    distances, indices = index.search(np.array([query_embedding], dtype="float32"), top_k)
+    distances, indices = faiss_index.search(np.array([query_embedding], dtype="float32"), top_k)
 
     # Remove duplicates from results
     seen = set()
@@ -112,18 +122,42 @@ def retrieve_context(query, top_k=15):
 
     return unique_texts
 
-# **Generate Response using Gemini**
-def generate_response(prompt, context):
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    try:
-        response = model.generate_content(
-            f"{st.session_state.config['system_prompt']}\n\nContext: {context}\n\nQuestion: {prompt}",
-            generation_config={"temperature": st.session_state.config["temperature"], "top_p": st.session_state.config["top_p"]}
-        )
-        return response.text
-    except Exception as e:
-        return f"Error generating response: {str(e)}"
+import time
 
+def generate_response(prompt, context):
+
+    system_prompt = st.session_state.config["system_prompt"]
+    temperature = st.session_state.config["temperature"]
+    top_p = st.session_state.config["top_p"]
+
+    input_parts = [system_prompt + context, prompt]
+    #st.write(input_parts)
+
+    generation_config = genai.GenerationConfig(
+        max_output_tokens=2048,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=32
+    )
+    response = model.generate_content(input_parts, generation_config=generation_config)
+    
+
+
+    retries = 3
+    for attempt in range(retries):
+        try:
+            response = model.generate_content(input_parts, generation_config=generation_config)
+            return response.text
+        except exceptions.ResourceExhausted:
+            st.warning(f"API quota exceeded. Retrying... ({attempt+1}/{retries})")
+            time.sleep(5)  # Wait before retrying
+        except Exception as e:
+            return f"Error generating response: {str(e)}"
+
+    st.error("API quota exceeded. Please try again later.")
+    return None
+
+    
 # **Delete Functions**
 def delete_file(filename):
     """Delete a specific file and its embeddings from MongoDB."""
@@ -137,9 +171,6 @@ def delete_all_files():
     collection.drop()
     st.session_state.stored_pdfs = []
     st.session_state.file_uploader_key += 1  # Reset file uploader
-
-    if os.path.exists(INDEX_FILE):
-        os.remove(INDEX_FILE)
 
     st.rerun()
 
