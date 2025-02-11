@@ -182,6 +182,9 @@ if stored_files:
         delete_all_files()
 else:
     st.info("No files stored in the database.")
+    
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 # **Chat Interface**
 st.header("💬 Chat with Documents")
