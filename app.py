@@ -15,6 +15,11 @@ from pymongo.server_api import ServerApi
 from google.api_core import exceptions
 from PyPDF2 import PdfReader
 import pdfplumber
+import asyncio
+import aiohttp
+from crawl4ai import AsyncWebCrawler
+from crawl4ai.async_configs import BrowserConfig, CrawlerRunConfig
+from bs4 import BeautifulSoup
 
 # Load environment variables
 load_dotenv()
@@ -31,9 +36,9 @@ collection = db["embeddings"]
 model = genai.GenerativeModel("gemini-2.0-flash")
 
 def initialize_vector_db():
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    index =  faiss.IndexFlatL2(384)
-    return model, index
+    model_local = SentenceTransformer("all-MiniLM-L6-v2")
+    index = faiss.IndexFlatL2(384)
+    return model_local, index
 
 embedding_model, faiss_index = initialize_vector_db()
 
@@ -49,6 +54,8 @@ if "config" not in st.session_state:
         "system_prompt": "Answer based on context.",
         "text_chunks": []
     }
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 # Save & Load Config
 def save_config(config):
@@ -84,6 +91,7 @@ def extract_text(uploaded_file):
 
 def process_pdf(file, filename):
     text = extract_text(file)
+    # Chunk the text into pieces of 2000 characters
     chunks = [text[i:i+2000] for i in range(0, len(text), 2000)]
     st.session_state.config["text_chunks"].extend(chunks)
     update_vector_db(chunks, filename)
@@ -94,7 +102,8 @@ def update_vector_db(texts, filename):
     documents = [{"filename": filename, "text": text, "embedding": emb} for text, emb in zip(texts, embeddings)]
     collection.insert_many(documents)
     faiss_index.add(np.array(embeddings, dtype="float32"))
-    #faiss.write_index(faiss_index, INDEX_FILE)
+    # Optionally, save the faiss index to disk:
+    # faiss.write_index(faiss_index, "faiss.index")
 
 def retrieve_context(query, top_k=15):
     query_embedding = embedding_model.encode([query]).tolist()[0]
@@ -108,7 +117,6 @@ def retrieve_context(query, top_k=15):
 
     if faiss_index.ntotal == 0:
         faiss_index.add(np.array(embeddings, dtype="float32"))
-
 
     top_k = min(top_k, len(texts))  # Avoid requesting more results than available
     distances, indices = faiss_index.search(np.array([query_embedding], dtype="float32"), top_k)
@@ -126,23 +134,17 @@ def retrieve_context(query, top_k=15):
 import time
 
 def generate_response(prompt, context):
-
     system_prompt = st.session_state.config["system_prompt"]
     temperature = st.session_state.config["temperature"]
     top_p = st.session_state.config["top_p"]
 
     input_parts = [system_prompt + context, prompt]
-    #st.write(input_parts)
-
     generation_config = genai.GenerationConfig(
         max_output_tokens=2048,
         temperature=temperature,
         top_p=top_p,
         top_k=32
     )
-    response = model.generate_content(input_parts, generation_config=generation_config)
-    
-
 
     retries = 3
     for attempt in range(retries):
@@ -158,7 +160,6 @@ def generate_response(prompt, context):
     st.error("API quota exceeded. Please try again later.")
     return None
 
-    
 # **Delete Functions**
 def delete_file(filename):
     """Delete a specific file and its embeddings from MongoDB."""
@@ -171,10 +172,54 @@ def delete_all_files():
     collection.drop()
     st.session_state.stored_pdfs = []
     st.session_state.file_uploader_key += 1  # Reset file uploader
-
     st.rerun()
 
-# **Streamlit UI**
+# ========= PDF Link Extraction via URL =========
+async def fetch_and_process_pdf_links(url: str):
+    """
+    Crawls the given URL for PDF links, downloads each PDF, extracts its text, and updates the DB.
+    """
+    browser_config = BrowserConfig()  # Default browser configuration
+    run_config = CrawlerRunConfig(remove_overlay_elements=True)
+    
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        result = await crawler.arun(url=url, config=run_config)
+        # Get internal links; they might be dicts or strings
+        internal_links = result.links.get("internal", [])
+        pdf_links = []
+        for link in internal_links:
+            if isinstance(link, dict):
+                href = link.get("href", "")
+                if ".pdf" in href.lower():
+                    pdf_links.append(href)
+            elif isinstance(link, str) and ".pdf" in link.lower():
+                pdf_links.append(link)
+        
+        if not pdf_links:
+            st.info("No PDF links found on the provided URL.")
+            return
+
+        async with aiohttp.ClientSession() as session:
+            for pdf_link in pdf_links:
+                try:
+                    async with session.get(pdf_link) as response:
+                        if response.status == 200:
+                            pdf_bytes = await response.read()
+                            pdf_file = BytesIO(pdf_bytes)
+                            filename = os.path.basename(pdf_link)
+                            process_pdf(pdf_file, filename)
+                            st.success(f"Processed PDF: {filename}")
+                        else:
+                            st.error(f"Failed to download PDF: {pdf_link}")
+                except Exception as e:
+                    st.error(f"Error processing {pdf_link}: {e}")
+        st.success("Finished processing all PDF links.")
+
+def process_pdf_links_from_url_sync(url: str):
+    asyncio.run(fetch_and_process_pdf_links(url))
+
+# ========= Streamlit UI =========
+
 st.title("📄 AI Document Q&A with Gemini")
 
 # **Sidebar Configuration**
@@ -203,9 +248,7 @@ if uploaded_files:
             process_pdf(pdf_file, file.name)
             st.session_state.stored_pdfs.append(file.name)
 
-    st.success(f"Processed {len(uploaded_files)} files")
-
-    # **Reset File Uploader**
+    st.success(f"Processed {len(uploaded_files)} file(s)")
     st.session_state.file_uploader_key += 1
     st.rerun()
 
@@ -224,9 +267,16 @@ if stored_files:
         delete_all_files()
 else:
     st.info("No files stored in the database.")
-    
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+
+# ========= PDF Link Extraction Section =========
+st.header("🔗 Add PDFs via URL")
+pdf_url = st.text_input("Enter a URL to crawl for PDFs:")
+if st.button("Extract PDFs from URL"):
+    if pdf_url:
+        process_pdf_links_from_url_sync(pdf_url)
+        st.rerun()
+    else:
+        st.warning("Please enter a valid URL.")
 
 # **Chat Interface**
 st.header("💬 Chat with Documents")
@@ -244,7 +294,6 @@ if prompt := st.chat_input("Ask a question (English/Swedish)"):
     context = " ".join(retrieved_context) if retrieved_context else "No relevant context found."
 
     with st.spinner("Generating response..."):
-        #st.write(context)
         response = generate_response(prompt, context)
 
     st.session_state.messages.append({"role": "user", "content": prompt})
