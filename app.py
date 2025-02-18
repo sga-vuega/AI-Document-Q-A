@@ -20,13 +20,36 @@ import aiohttp
 from crawl4ai import AsyncWebCrawler
 from crawl4ai.async_configs import BrowserConfig, CrawlerRunConfig
 from bs4 import BeautifulSoup
-
+import re
 # Load environment variables
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY")
 MONGO_URI = os.getenv("MongoDB")
 
 genai.configure(api_key=API_KEY)
+
+def chunk_text(text, chunk_size=400, min_chunk_length=20):
+    paragraphs = re.split(r'\n{2,}', text)  # Split by paragraphs
+    chunks = []
+    
+    for para in paragraphs:
+        sentences = re.split(r'(?<=[.!?])\s+', para)  # Split paragraph into sentences
+        temp_chunk = ""
+
+        for sentence in sentences:
+            if len(temp_chunk) + len(sentence) < chunk_size:
+                temp_chunk += sentence + " "
+            else:
+                cleaned_chunk = temp_chunk.strip()
+                if len(cleaned_chunk) >= min_chunk_length:  # Remove very short chunks
+                    chunks.append(cleaned_chunk)
+                temp_chunk = sentence + " "  # Start a new chunk
+        
+        cleaned_chunk = temp_chunk.strip()
+        if len(cleaned_chunk) >= min_chunk_length:  # Append remaining text if valid
+            chunks.append(cleaned_chunk)
+
+    return chunks
 
 # MongoDB Connection
 client = MongoClient(MONGO_URI, server_api=ServerApi('1'))
@@ -92,7 +115,7 @@ def extract_text(uploaded_file):
 def process_pdf(file, filename):
     text = extract_text(file)
     # Chunk the text into pieces of 2000 characters
-    chunks = [text[i:i+2000] for i in range(0, len(text), 2000)]
+    chunks = chunk_text(text)
     st.session_state.config["text_chunks"].extend(chunks)
     update_vector_db(chunks, filename)
 
