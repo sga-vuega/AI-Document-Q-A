@@ -13,3 +13,4 @@ aiohttp
 crawl4ai
 beautifulsoup4
 google-api-core
+playwright
