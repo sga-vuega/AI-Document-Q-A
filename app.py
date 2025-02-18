@@ -18,8 +18,10 @@ import pdfplumber
 
 # Load environment variables
 load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("GOOGLE_API_KEY")
 MONGO_URI = os.getenv("MongoDB")
+
+genai.configure(api_key=API_KEY)
 
 # MongoDB Connection
 client = MongoClient(MONGO_URI, server_api=ServerApi('1'))
